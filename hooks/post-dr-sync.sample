@@ -1,0 +1,12 @@
+#!/bin/bash
+source ${DR_GIT_HOME}/dr-git/drgit-script-util
+source ${DR_GIT_HOME}/dr-git/drgit-git-util
+
+# After every sync, we'll want to update our python packages
+
+# allow env variable PIP to specify which pip to use
+PIP=$(string_or "$PIP" "pip")
+cd $(git_top_level); sudo $PIP install -r $(git_top_level)/requirements.txt --index-url http://pip-repository.internal/simple
+echo "*** Updated pip dependencies"
+
+echo $(basename ${0})

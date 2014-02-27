@@ -1,0 +1,262 @@
+#!/bin/bash
+# Requires "drgit-script-util" to be sourced
+# Requires "drgit-git-util" to be sourced
+# Requires "git-dr-sync" to be sourced
+
+function __require_dev_branch() {
+    if ! string_startswith $(git_current_branch) $(dr_prefix_dev); then
+        error_msg "${FUNCNAME} - Can only be run from a dev branch"
+        exit 1
+    fi
+}
+
+function __name_dev_branch() {
+    if [[ $# -ne 1 ]]; then
+          usage_and_die "${FUNCNAME} <branch_name>"
+    fi
+    local branch_name=${1}
+    echo $(dr_prefix_dev)${branch_name}
+}
+
+function __name_drc_from_dev_branch() {
+    if [[ $# -ne 1 ]]; then
+          usage_and_die "${FUNCNAME} <branch_name>"
+    fi
+    local dev_branch_name=${1}
+    local drc_prefix="drc/"
+    if ! string_startswith ${dev_branch_name} $(dr_prefix_dev); then
+        error_msg "${FUNCNAME} - Can only be run from a dev branch"
+        exit 1
+    fi
+
+    echo ${dev_branch_name/$(dr_prefix_dev)/${drc_prefix}}
+}
+
+# TODO - Generalize this... should this be a git config?
+function __name_scratch_branch() {
+    if [[ $# -ne 1 ]]; then
+          usage_and_die "${FUNCNAME} <branch_name>"
+    fi
+    local branch_name=${1}
+    echo scratch/${branch_name}
+}
+
+function create_dev_release_candidate() {
+    local dev_branch_name=$(git_current_branch)
+    local drc_branch_name=$(__name_drc_from_dev_branch ${dev_branch_name})
+    local project_repo_branch_name=$(dr_master_repo)/$(dr_branch_source ${dev_branch_name})
+    local dev_divergent_commit=$(git merge-base ${project_repo_branch_name} ${dev_branch_name})
+
+    local commit_msg_buffer=""
+    local squash_params=""
+
+    if branch_diff_equal ${dev_branch_name} ${project_repo_branch_name}; then
+        error_msg "${FUNCNAME} - ${dev_branch_name} is identical to ${project_repo_branch_name}, nothing to do"
+        return 1
+    fi
+
+    if ! branch_exists_locally "${drc_branch_name}"; then
+        # If we don't have an existing release branch, pre-populate our commit messages
+        commit_msg_buffer=$(git_commit_msgs ${dev_divergent_commit}..HEAD)
+    else
+        # Check if we have an existing release branch
+        local drc_divergent_commit=$(git merge-base ${project_repo_branch_name} ${drc_branch_name})
+
+        # Check if our diff's OR merge-base's don't match
+        if ! branch_diff_equal ${dev_branch_name} ${drc_branch_name}; then
+            console_msg "Incorporating new code changes : ${drc_branch_name}"
+        elif [[ ${dev_divergent_commit} != ${drc_divergent_commit}  ]]; then
+            console_msg "Incorporating new merge-base : ${drc_branch_name}"
+        else
+            console_msg "Release candidate up-to-date : ${drc_branch_name}"
+        fi
+        commit_msg_buffer=$(git_commit_msgs ${drc_divergent_commit}..${drc_branch_name})
+        colorize git branch -D ${drc_branch_name}
+        console_msg "Deleted existing dev release candidate : ${drc_branch_name}"
+    fi
+
+    colorize git checkout -b ${drc_branch_name}
+
+    line_divider
+    echo "${commit_msg_buffer}" 1>&2
+    line_divider
+    if ! question_yes_no "Re-use previously entered message"; then
+        commit_msg_buffer=""
+    fi
+
+    if ! branch_safe_squash_inplace ${dev_divergent_commit} "${commit_msg_buffer}"; then
+        error_msg "${FUNCNAME} - Failed to squash branch in place"
+        return 1
+    fi
+
+    colorize git checkout ${dev_branch_name}
+}
+
+###################
+# Development methods #
+###################
+# STABLE
+function dev_squash() {
+    __require_git_dir
+    __require_dev_branch
+
+    local divergent_commit=$(git merge-base $(dr_master_repo)/$(dr_branch_source $(git_current_branch)) HEAD)
+    local squash_to_commit=$(string_or "${1}" ${divergent_commit})
+
+    local simple_log=$(git log --format=oneline ${squash_to_commit}..HEAD)
+    local num_commits=$(string_strip $(echo "${simple_log}" | wc -l))
+
+    if succeed_if_null "${simple_log}"; then
+        console_msg "Aborted squashing branch : No commits to squash"
+        return 1
+    fi
+
+    echo "${simple_log}"
+    if ! question_yes_no "Squash ${num_commits} commit(s)"; then
+        console_msg "Aborted squashing branch : Aborted by user"
+        return 1
+    fi
+
+    local commit_msgs=$(git_commit_msgs ${squash_to_commit}..HEAD)
+
+    # Development release candidate...
+    if ! branch_safe_squash_inplace ${squash_to_commit} "${commit_msgs}"; then
+        error_msg "${FUNCNAME} - Failed to squash branch in place"
+        return 1
+    fi
+
+    execute_hook_when_available post-dr-dev-squash
+}
+
+# STABLE
+function dev_start() {
+    if [[ $# -eq 0 || $# -gt 2 ]]; then
+        usage_and_die "${FUNCNAME} <branch_name> [<project_branch>]"
+    fi
+    __require_git_dir
+    __require_fetch
+
+    local branch_name=${1}
+    local project_branch=${2}
+    local repo_name=$(dr_master_repo)
+    local tgt_branch_name=$(__name_dev_branch ${branch_name})
+
+    if succeed_if_null "${project_branch_name}"; then
+        console_msg "Select your project"
+        project_branch=$(choose_target "$(_enumerate_projects)")
+    fi
+
+    if ! branch_create_locally ${tgt_branch_name} ${project_branch} ${repo_name}; then
+        return 1
+    fi
+
+    execute_hook_when_available post-dr-dev-start ${tgt_branch_name} ${project_branch}
+    console_msg "Created dev branch : ${tgt_branch_name} from ${project_branch}"
+}
+
+
+# STABLE (?)
+function dev_submit() {
+    __require_git_dir
+    __require_dev_branch
+
+    local dev_branch_name=$(git_current_branch)
+    local project_branch_name=$(dr_branch_source ${dev_branch_name})
+
+    execute_hook_when_available pre-dr-dev-submit ${dev_branch_name}
+
+    # Before we push, make sure we're up to date with master
+    if ! dev_sync; then
+        colorize git rebase --abort
+        error_msg "${FUNCNAME} - Could not auto-update branch with ${project_branch_name}"
+        error_msg "${FUNCNAME} - Run 'git dr-dev-sync' and try submitting again"
+        return 1
+    fi
+
+    # TODO - Fix this to work on multi-author branches
+    if ! create_dev_release_candidate; then
+        colorize git checkout ${dev_branch_name}
+        error_msg "${FUNCNAME} - Could not create dev release candidate"
+        return 2
+    fi
+
+    local drc_branch_name=$(__name_drc_from_dev_branch ${dev_branch_name})
+
+    if ! question_yes_no "Submit ${dev_branch_name} directly to ${project_branch_name}"; then
+        execute_hook_when_available post-dr-dev-submit ${dev_branch_name}
+        console_msg "Created submission branch : ${drc_branch_name}"
+
+        return 3
+    fi
+
+    if ! colorize git push $(dr_master_repo) ${drc_branch_name}:${project_branch_name}; then
+        error_msg "${FUNCNAME} - Could not submit ${drc_branch_name} to ${project_branch_name}"
+        error_msg "Try running 'git dr-dev-sync' then 'git dr-dev-submit"
+        return 4
+    fi
+
+    # Cleanup our dev branch as its now on ${project_branch_name}
+    dev_delete
+
+    execute_hook_when_available post-dr-dev-submit ${dev_branch_name}
+    console_msg "Submitted branch : ${drc_branch_name} to ${project_branch_name}"
+}
+
+
+# STABLE
+function dev_sync() {
+    __require_git_dir
+    __require_dev_branch
+
+    local branch_name=$(git_current_branch)
+    local src_branch=$(dr_branch_source "${branch_name}")
+
+    if ! branch_rebase_with_source $(dr_master_repo)/${src_branch}; then
+        error_msg "  * Re-run 'git dr-dev-sync'"
+        return 1
+    fi
+
+    console_msg "Synced branch : ${branch_name} with ${src_branch}"
+    execute_hook_when_available post-dr-dev-sync
+}
+
+
+# UNTESTED
+function dev_delete() {
+    __require_git_dir
+    __require_dev_branch
+
+    __require_fetch
+
+    local master_repo=$(dr_master_repo)
+    local dev_branch_name=$(git_current_branch)
+    local drc_branch_name=$(__name_drc_from_dev_branch ${dev_branch_name})
+
+    colorize git checkout $(dr_master_branch)
+
+    declare -a branch_array=( "${dev_branch_name}" "${drc_branch_name}" )
+    if question_yes_no "Delete local copy of ${dev_branch_name}"; then
+        for current_branch in ${branch_array[@]}; do
+            if ! branch_exists_locally ${current_branch}; then
+                continue
+            fi
+
+            colorize git branch -D ${current_branch}
+            console_msg "Deleted branch locally : ${current_branch}"
+        done
+    fi
+
+    if ! question_yes_no "Delete remote copy of ${dev_branch_name}"; then
+        return 1
+    fi
+
+    for current_branch in ${branch_array[@]}; do
+        if ! branch_exists_remotely ${current_branch} ${master_repo}; then
+            continue
+        fi
+
+        if branch_delete_from_remote ${current_branch} ${master_repo}; then
+            console_msg "Deleted branch remotely : ${current_branch}"
+        fi
+    done
+}

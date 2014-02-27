@@ -1,0 +1,290 @@
+#!/bin/bash
+# Requires "drgit-script-util" to be sourced
+# Requires "drgit-git-util" to be sourced
+# Requires "git-dr-sync" to be sourced
+
+function __require_release_branch() {
+    if ! string_startswith $(git_current_branch) $(dr_prefix_release); then
+        error_msg "${FUNCNAME} - Can only be run from a release branch"
+        exit 1
+    fi
+}
+
+function __name_release_branch() {
+    if [[ $# -ne 1 ]]; then
+          usage_and_die "${FUNCNAME} <branch_name>"
+    fi
+    local branch_name=${1}
+    echo $(dr_prefix_release)${branch_name}
+}
+
+function _project_branches_in_release() {
+    local merge_log_msgs=$(git log --merges --format='%H %cE %ct %s' $(dr_master_repo_branch).. | grep $(dr_prefix_project))
+    local project_branch
+
+    echo "${merge_log_msgs}" | while read current_log_msg ; do
+        project_branch=$(echo "${current_log_msg}" | cut -d " " -f 3- | cut -d "'" -f 2)
+        echo $(_strip_remote_from_project "${project_branch}") "${current_log_msg}"
+    done
+}
+
+# TODO - Generalize this... should this be a git config?
+function release_tag_format() {
+    echo release-$(echo_datetime)
+}
+
+# STABLE
+function release_start() {
+    if [[ $# -ne 1 ]]; then
+        usage_and_die "${FUNCNAME} <branch_name>"
+    fi
+    __require_git_dir
+    __require_fetch
+
+    local branch_name=${1}
+    local master_repo=$(dr_master_repo)
+    local release_branch=$(__name_release_branch ${branch_name})
+
+    if ! branch_create_locally ${release_branch} $(dr_master_branch) ${master_repo}; then
+        error_msg "${FUNCNAME} - Could not create ${release_branch} on ${master_repo}"
+        return 1
+    fi
+
+    execute_hook_when_available post-dr-release-start ${release_branch}
+    console_msg "Created release branch : ${release_branch} from ${master_repo}"
+}
+
+# STABLE
+function release_add() {
+    if [[ $# -gt 1 ]]; then
+          usage_and_die "${FUNCNAME} [<project_branch>]"
+    fi
+
+    __require_git_dir
+    __require_release_branch
+
+    # We need to fetch to make sure we download the latest ${project_branch}
+    console_msg "Pruning knowledge of remote branches that no longer exist..."
+    __require_fetch --prune
+
+    local all_possible_project_branches=$(_enumerate_projects)
+    local project_branch
+    if succeed_if_null "${all_possible_project_branches}"; then
+        error_msg "${FUNCNAME} - No branches to add"
+        return 1
+    elif [[ $# -lt 1 ]]; then
+        project_branch=$(choose_target "${all_possible_project_branches}")
+    else
+        project_branch=${1}
+    fi
+
+    # Validate that the specified branch even exists
+    if ! string_contains "${all_possible_project_branches}" "${project_branch}"; then
+        error_msg "${FUNCNAME} - Invalid branch - ${project_branch}"
+        return 2
+    fi
+
+    if ! _release_add_one_branch ${project_branch}; then
+        return 3
+    fi
+
+    console_msg "Integrated branch : ${project_branch} to [current_release]"
+    execute_hook_when_available post-dr-release-add ${project_branch}
+}
+
+function _release_add_one_branch() {
+    if [[ $# -ne 1 ]]; then
+          usage_and_die "${FUNCNAME} <project_branch>"
+    fi
+
+    local project_branch=${1}
+    local project_repo_branch=$(dr_master_repo)/${project_branch}
+    local release_branch=$(git_current_branch)
+    local tracked_branches=$(_project_branches_in_release)
+
+    # Keep track of where we first started adding this branch
+    local checkpoint_commit=$(git rev-parse HEAD)
+
+    if ! string_startswith ${project_branch} "$(dr_prefix_project)"; then
+        error_msg "${FUNCNAME} - Expected project branch: ${project_branch}"
+        return 1
+    fi
+
+    # Always pull the REMOTE project-branch, never local
+    local divergent_merge=$(git merge-base $(dr_master_repo_branch) ${project_repo_branch} 2>&1)
+    if string_contains "${divergent_merge}" "Not a valid object name"; then
+        error_msg "${FUNCNAME} - Could not find remote branch - ${project_repo_branch}"
+        return 2
+    elif string_contains "${tracked_branches}" "${project_branch}"; then
+        error_msg "${FUNCNAME} - Branch already in release - ${project_branch}"
+        return 3
+    fi
+
+    line_divider
+    git log ${divergent_merge}..${project_repo_branch}
+    line_divider
+
+    if ! question_yes_no "Accept this branch"; then
+        error_msg "${FUNCNAME} - Rejected branch - ${project_branch}"
+        return 4
+    fi
+
+    # Always pull the project-branch from origin, never from local
+    # TODO - Revisit no-edit when incorporating new branches
+    if ! colorize git merge --no-ff --no-edit "${project_repo_branch}"; then
+        # TODO - Print out conflicting files
+        colorize git merge --abort
+        error_msg "${FUNCNAME} - Failed to add branch due to conflicts : ${project_branch}"
+        error_msg "Consider running 'git checkout ${project_branch}' and 'git dr-project-sync' to resolve conflicts with $(dr_master_branch)"
+
+        return 5
+    fi
+
+    console_msg "Merged branch : ${project_branch} to [current_release]"
+}
+
+# TODO - WIP
+function release_remove() {
+    if [[ $# -gt 1 ]]; then
+          usage_and_die "${FUNCNAME} [<branch_name>]"
+    fi
+
+    __require_git_dir
+    __require_release_branch
+
+    local release_branch=$(git_current_branch)
+    local all_project_branches=$(echo "$(_project_branches_in_release)" | cut -d ' ' -f  1 | uniq)
+
+    local project_branch
+    if succeed_if_null "${all_project_branches}"; then
+        error_msg "${FUNCNAME} - No branches to remove"
+        return 1
+    elif [[ $# -lt 1 ]]; then
+        project_branch=$(choose_target "${all_project_branches}")
+    else
+        project_branch=${1}
+    fi
+
+    if ! string_contains "${all_project_branches}" "${project_branch}"; then
+        error_msg "${FUNCNAME} - Invalid branch - ${project_branch}"
+        return 2
+    fi
+
+    if ! _release_remove_one_branch ${project_branch}; then
+        return 3
+    fi
+
+    execute_hook_when_available post-dr-release-remove ${project_branch}
+}
+
+function _release_remove_one_branch() {
+    if [[ $# -ne 1 ]]; then
+          usage_and_die "${FUNCNAME} <branch_name>"
+    fi
+
+    local release_branch=$(git_current_branch)
+    local project_branch=${1}
+
+    # Verify the integrity of the dev branches and dev candidate release branches
+    if ! string_startswith ${project_branch} "$(dr_prefix_project)"; then
+        error_msg "${FUNCNAME} - Expected project branch: ${project_branch}"
+        return 1
+    fi
+
+    local project_info=$( echo "$(_project_branches_in_release)" | grep "^${project_branch}" )
+    if succeed_if_null "${project_info}"; then
+        error_msg "${FUNCNAME} - Could not find branch - ${project_branch}"
+        error_msg "  ${project_ats}"
+        return 2
+    fi
+
+    # project branch commits in reverse order
+    local project_merge_commit=$(echo ${project_info} | cut -d ' ' -f 2)
+
+    line_divider
+    colorize git log ${project_merge_commit}^..${project_merge_commit}
+    line_divider
+
+    if ! question_yes_no "Remove this branch"; then
+        error_msg "${FUNCNAME} - Aborted branch removal - ${project_branch}"
+        return 3
+    fi
+    colorize git rebase --preserve-merges --onto ${project_merge_commit}^ ${project_merge_commit}
+
+    # Re-write tracker file
+    console_msg "Removed branch : ${project_branch} xxx [current_release]"
+}
+
+
+# UNTESTED
+function release_finish() {
+    __require_git_dir
+    __require_release_branch
+
+    local release_branch=$(git_current_branch)
+    local master_repo=$(dr_master_repo)
+    local master_branch=$(dr_master_branch)
+    local master_repo_branch=$(dr_master_repo_branch)
+
+    # Prompt to see if the release-manager wants to update master
+    line_divider
+    git log --format=short $(git merge-base ${master_repo_branch} HEAD)..HEAD
+    line_divider
+    if ! question_yes_no "Finish release and merge above commits into master"; then
+        error_msg "Aborted release : ${release_branch}"
+        return 1
+    fi
+    
+    # Create release tag
+    local release_tag=$(release_tag_format)
+    git tag -a -m "Released by ${USER}" ${release_tag}
+    
+    # Push up all our commits and tags
+    if ! colorize git push ${master_repo} ${release_branch}:${master_branch} ${release_tag}; then
+        git tag -d ${release_tag}
+        error_msg "${FUNCNAME} - Could not push : ${master_repo_branch}"
+        return 2
+    fi
+    console_msg "Updated branch : ${release_branch} to ${master_repo_branch}"
+
+    # Cleaning up all branches involved in the push
+    echo "$(_project_branches_in_release)"
+    declare -a branch_array=( $(echo "$(_project_branches_in_release)" | cut -d ' ' -f 1 | uniq) )
+    for current_branch in ${branch_array[@]}; do
+        if [ "${current_branch}" == "${master_branch}" || "${current_branch}" -eq "${release_branch}"} ]; then
+            continue
+        fi
+
+        branch_delete_from_remote ${current_branch} ${master_repo}
+    done
+
+    _release_branch_cleanup
+
+    # This is not fatal, just emit an error message and continue
+    if ! branch_rebase_with_source ${master_repo_branch}; then
+        error_msg "Could not auto-sync with master"
+    fi
+    
+    execute_hook_when_available post-dr-release-finish
+    console_msg "Finished release : ${release_branch} to ${master_repo_branch}"
+}
+
+# UNTESTED
+function release_delete() {
+    __require_git_dir
+    __require_release_branch
+
+    local release_branch=$(git_current_branch)
+    if question_yes_no "Delete release - ${release_branch}"; then
+        _release_branch_cleanup
+        console_msg "Deleted release : ${release_branch}"
+    fi
+}
+
+function _release_branch_cleanup() {
+    local release_branch=$(git_current_branch)
+
+    colorize git checkout $(dr_master_branch)
+    colorize git branch -D ${release_branch}
+    branch_delete_from_remote ${release_branch} $(dr_master_repo)
+}

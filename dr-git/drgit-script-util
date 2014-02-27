@@ -1,0 +1,313 @@
+#!/bin/bash
+
+##############################################################################
+# BASH coloring tips                                                         #
+# http://linuxtidbits.wordpress.com/2008/08/11/output-color-on-bash-scripts/ #
+##############################################################################
+# Color function : Readable color escaping
+function __color_escape() {
+    echo "\033[${1}"
+}
+
+# Color function : Alias colors
+function __color_init() {
+    C_RESET=$(__color_escape 0m) ;
+    C_BOLD_ON=$(__color_escape 1m) ; C_BOLD_OFF=$(__color_escape 22m)
+    C_BLINK_ON=$(__color_escape 5m) ; C_BLINK_OFF=$(__color_escape 25m)
+    C_REVERSE_ON=$(__color_escape 7m); C_REVERSE_OFF=$(__color_escape 27m)
+
+    # Foreground colors
+    CF_DEFAULT=$(__color_escape 39m) ;
+    CF_BLACK=$(__color_escape 30m) ; CF_RED=$(__color_escape 31m)
+    CF_GREEN=$(__color_escape 32m) ; CF_BROWN=$(__color_escape 33m)
+    CF_BLUE=$(__color_escape 34m) ; CF_MAGENTA=$(__color_escape 35m)
+    CF_CYAN=$(__color_escape 36m) ; CF_WHITE=$(__color_escape 37m)
+
+    # Background colors
+    CB_DEFAULT=$(__color_escape 49m)
+    CB_BLACK=$(__color_escape 40m) ; CB_RED=$(__color_escape 41m)
+    CB_GREEN=$(__color_escape 42m) ; CB_BROWN=$(__color_escape 43m)
+    CB_BLUE=$(__color_escape 44m) ; CB_MAGENTA=$(__color_escape 45m)
+    CB_CYAN=$(__color_escape 46m) ; CB_WHITE=$(__color_escape 47m)
+}
+
+# Color function : Pretty print given command and execute
+function colorize() {
+    local cmd_string=${@}
+    echo -e ${CF_GREEN}\>\>\> ${CF_BLUE}${cmd_string}${CF_DEFAULT}
+    ${cmd_string}
+    return ${?}
+}
+
+##############################################################################
+# Misc helper functions                                                      #
+##############################################################################
+function usage_and_die() {
+    echo "usage: ${@}" 1>&2
+    exit 1
+}
+
+function console_msg() {
+    echo -e "*** ${@}" 1>&2
+}
+
+function error_msg() {
+    echo -e "${CF_RED}${C_BOLD_ON}error: ${@}${C_BOLD_OFF}${CF_DEFAULT}" 1>&2
+}
+
+function line_divider() {
+    echo ">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>" 1>&2
+}
+
+##############################################################################
+# String helper functions                                                    #
+##############################################################################
+
+# String function : Conditional check, 1 if not null (bash false), 0 if null (bash true)
+function succeed_if_null() {
+    if [[ $# -ne 1 ]]; then
+        usage_and_die "${FUNCNAME} <string_to_check>"
+    fi
+
+    local string_to_check=${1}
+    if [[ -n "${string_to_check}" ]]; then
+        return 1
+    else
+        return 0
+    fi
+}
+
+# String function : Conditional check, 0 if not null (bash true), 1 if null (bash false)
+function succeed_if_not_null() {
+    if [[ $# -ne 1 ]]; then
+        usage_and_die "${FUNCNAME} <string_to_check>"
+    fi
+
+    local string_to_check=${1}
+    if succeed_if_null "${string_to_check}"; then
+        return 1
+    else
+        return 0
+    fi
+}
+
+# String function : Use grep to check for certain regex matches
+function __check_with_grep() {
+    if [[ $# -ne 2 ]]; then
+        usage_and_die "${FUNCNAME} <string_to_check> <search_string>"
+    fi
+
+    local string_to_check=${1}
+    local search_string=${2}
+
+    local grep_result=$(echo "${string_to_check}" | grep "${search_string}")
+    succeed_if_not_null "${grep_result}"
+    return ${?}
+}
+
+function sort_array() {
+    echo $(echo ${@} | sed -e 's/ /\'$'\n/g' | sort)
+}
+
+# String function : Python-style or statement
+function string_or() {
+    if [[ $# -lt 2 ]]; then
+        usage_and_die "${FUNCNAME} <string_1> <string_2> [<string_N>]"
+    fi
+
+    for current_string in "$@"; do
+        if succeed_if_not_null "${current_string}"; then
+            echo "${current_string}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# String function : Python-style and statement
+function string_and() {
+    if [[ $# -lt 2 ]]; then
+        usage_and_die "${FUNCNAME} <string_1> <string_2> [<string_N>]"
+    fi
+
+    local last_string=""
+    for current_string in "$@"; do
+        if succeed_if_null "${current_string}"; then
+            return 1
+        fi
+        last_string=${current_string}
+    done
+
+    echo "${last_string}"
+    return 0
+}
+
+# String function : Python-style "search_string" in "string_to_check"
+function string_contains() {
+    if [[ $# -ne 2 ]]; then
+        usage_and_die "${FUNCNAME} <string_to_check> <search_string>"
+    fi
+
+    local string_to_check=${1}
+    local search_string=${2}
+    __check_with_grep "${string_to_check}" "${search_string}"
+    return ${?}
+}
+
+# String function : Python-style "search_string".startswith("string_to_check")
+function string_startswith() {
+    if [[ $# -ne 2 ]]; then
+        usage_and_die "${FUNCNAME} <string_to_check> <search_string>"
+    fi
+
+    local string_to_check=${1}
+    local search_string=${2}
+    __check_with_grep "${string_to_check}" "^${search_string}"
+    return ${?}
+}
+
+# String function : Python-style "search_string".endswith("string_to_check")
+function string_endswith() {
+    if [[ $# -ne 2 ]]; then
+        usage_and_die "${FUNCNAME} <string_to_check> <search_string>"
+    fi
+
+    local string_to_check=${1}
+    local search_string=${2}
+    __check_with_grep "${string_to_check}" "${search_string}$"
+    return ${?}
+}
+
+# http://www.unix.com/shell-programming-scripting/17374-strip-leading-trailing-spaces-only-shell-variable-embedded-spaces.html
+# String function : Python-style "  string_to_strip  ".strip() but does NOT strip newlines
+function string_strip() {
+    if [[ $# -ne 1 ]]; then
+        usage_and_die "${FUNCNAME} <string_to_strip>"
+    fi
+
+    local string_to_strip=${1}
+
+    # according to http://face.centosprime.com/macosxw/sed-one-liners/
+    # USE OF '\t' IN SED SCRIPTS: For clarity in documentation, we have used
+    # the expression '\t' to indicate a tab character (0x09) in the scripts.
+    # However, most versions of sed do not recognize the '\t' abbreviation,
+    # so when typing these scripts from the command line, you should press
+    # the TAB key instead. '\t' is supported as a regular expression
+    # metacharacter in awk, perl, and HHsed, sedmod, and GNU sed v3.02.80.
+    echo ${string_to_strip} | sed 's/^ *//;s/ *$//'
+}
+
+# http://stackoverflow.com/questions/918886/split-string-based-on-delimiter-in-bash
+# String function : Python-style "hello\nworld".split()
+function string_split() {
+    if [[ $# -ne 2 ]]; then
+        usage_and_die "${FUNCNAME} <string_to_split> <delimiter>"
+    fi
+
+    local string_to_split=${1}
+    local delimiter=${2}
+
+    echo "${string_to_split}" | tr "${delimiter}" '\n'
+}
+
+# Date function : Convenience method to print out YYYYMMDD-HHMMSS
+function echo_datetime() {
+    echo $(date -u "+%Y%m%d-%H%M%S")
+}
+
+function readlink_dir() {
+    if [[ $# -ne 1 ]]; then
+        usage_and_die "${FUNCNAME} <dirname>>"
+    fi
+    local dir_to_readlink=${1}
+
+    # Can't use straight up "readlink -f" because Mac's don't support it
+    echo $(cd "${dir_to_readlink}"; pwd)
+}
+
+##############################################################################
+# Input helper functions                                                     #
+##############################################################################
+
+# Input function : Ask user for confirmation, returns status code 0 if 'yes'
+function question_yes_no() {
+    if [[ $# -ne 1 ]]; then
+        usage_and_die "${FUNCNAME} <question>"
+    fi
+
+    local question=${1}
+    local question_response=""
+
+    while true; do
+        echo -n "${question}? [y/n] " 1>&2
+        read question_response
+
+        case "${question_response}" in
+            Y*|y*) return 0 ;;
+            N*|n*) return 1 ;;
+        esac
+    done
+}
+
+# Input function : Ask user for input, use default if nothing entered
+function question_with_default() {
+    if [[ $# -ne 2 ]]; then
+        usage_and_die "${FUNCNAME} <question> <question_default_value>"
+    fi
+
+    local question=${1}
+    local question_default_value=${2}
+    local question_response=""
+
+    echo -n "${question}? [${question_default_value}] " 1>&2
+    read question_response
+
+    echo $(string_or "${question_response}" "${question_default_value}")
+}
+
+function array_choice() {
+    if [[ $# -eq 0 ]]; then
+        usage_and_die "Received $#, expected parameters"
+    fi
+
+    declare -a incoming_array=(${@})
+    local incoming_items=${#incoming_array[@]}
+
+    declare -i current_choice=1
+    for current_target in ${incoming_array[@]}; do
+        console_msg "${current_choice}) $current_target"
+        current_choice=$(expr $current_choice + 1)
+    done
+
+    echo -n "Your choice? : " 1>&2
+    read chosen_id
+
+    if [[ ${chosen_id} -lt 1 || ${chosen_id} -gt ${incoming_items} ]]; then
+        error_msg "Invalid choice, choose between 1 and ${incoming_items}"
+        echo ""
+    else
+        declare -i chosen_item_id=$(expr ${chosen_id} - 1)
+        echo "${incoming_array[${chosen_item_id}]}"
+    fi
+}
+
+function choose_target() {
+    if [[ $# -eq 0 ]]; then
+        usage_and_die "choose_target target [target ...]"
+    fi
+
+    local chosen_result=""
+    while succeed_if_null "${chosen_result}";
+    do
+        console_msg "Available choices"
+        line_divider
+
+        chosen_result=$(array_choice "${@}")
+    done
+
+    echo ${chosen_result}
+}
+
+set -e
+__color_init

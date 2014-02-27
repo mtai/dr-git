@@ -1,0 +1,14 @@
+#!/bin/bash
+source ${DR_GIT_HOME}/dr-git/drgit-script-util
+source ${DR_GIT_HOME}/dr-git/drgit-git-util
+
+source ${DR_GIT_HOME}/dr-git/dr-git-init
+source ${DR_GIT_HOME}/dr-git/dr-git-dev
+source ${DR_GIT_HOME}/dr-git/dr-git-project
+source ${DR_GIT_HOME}/dr-git/dr-git-release
+source ${DR_GIT_HOME}/dr-git/dr-git-clone
+source ${DR_GIT_HOME}/dr-git/dr-git-version
+source ${DR_GIT_HOME}/dr-git/dr-git-vacuum
+
+set -e
+${@}

@@ -1,0 +1,5 @@
+#!/bin/bash
+source ${DR_GIT_HOME}/dr-git/drgit-script-util
+source ${DR_GIT_HOME}/dr-git/drgit-git-util
+
+echo $(basename ${0})

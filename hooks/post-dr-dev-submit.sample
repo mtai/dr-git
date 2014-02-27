@@ -1,0 +1,7 @@
+#!/bin/bash
+# Add code here to run after - dr-git-dev-submit
+
+source ${DR_GIT_HOME}/dr-git/drgit-script-util
+source ${DR_GIT_HOME}/dr-git/drgit-git-util
+
+echo $(basename ${0})

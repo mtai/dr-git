@@ -1,0 +1,539 @@
+#!/bin/bash
+# Requires "dr-script-util" to be sourced
+
+#################################################
+# dr-git constants                              #
+#################################################
+DR_GIT_VERSION="20121009"
+
+DR_GIT_CONFIG_PREFIX_DEV="drgit.prefix.dev"
+DR_GIT_CONFIG_PREFIX_PROJECT="drgit.prefix.project"
+DR_GIT_CONFIG_PREFIX_RELEASE="drgit.prefix.release"
+DR_GIT_CONFIG_MASTER_REPO="drgit.master.repo"
+DR_GIT_CONFIG_MASTER_BRANCH="drgit.master.branch"
+
+DR_GIT_CONFIGS=(${DR_GIT_CONFIG_PREFIX_DEV} ${DR_GIT_CONFIG_PREFIX_DEV} ${DR_GIT_CONFIG_PREFIX_RELEASE} ${DR_GIT_CONFIG_MASTER_REPO} ${DR_GIT_CONFIG_MASTER_BRANCH})
+
+#################################################
+# Convenience methods to get certain git values #
+#################################################
+# STABLE
+function git_top_level() {
+    local command_response=$(git rev-parse --show-toplevel 2>/dev/null)
+    if [[ ${?} -eq 0 ]]; then
+        echo "${command_response}"
+    fi
+}
+
+# STABLE
+function git_current_branch() {
+    git branch --no-color | grep '*' | cut -d ' ' -f 2-
+}
+
+function git_local_branches() {
+    for current_branch in $(sort_array $(git branch --no-color | cut -d ' ' -f 2-)); do
+        echo $(string_strip ${current_branch})
+    done
+}
+
+# STABLE
+function git_repo_url() {
+    if [[ $# -ne 1 ]]; then
+        usage_and_die "${FUNCNAME} <repo_name>"
+    fi
+
+    local repo_name=${1}
+    git config --get remote.${repo_name}.url
+}
+
+# STABLE
+function git_commit_msgs() {
+    if [[ $# -eq 0 ]]; then
+        usage_and_die "${FUNCNAME} <refspec>..<refspec>"
+    fi
+
+    git log --format="format:%s%n%n%b" "${@}"
+}
+
+function git_commit_shas() {
+    if [[ $# -eq 0 ]]; then
+        usage_and_die "${FUNCNAME} <refspec>..<refspec>"
+    fi
+
+    git log --format="format:%H" "${@}"
+}
+
+# STABLE
+function git_commit_with_msg() {
+    if [[ $# -ne 1 ]]; then
+        usage_and_die "${FUNCNAME} <commit_msg_buffer>"
+    fi
+    local commit_msg_buffer=${1}
+    local commit_msg_file=$(mktemp -t ${FUNCNAME}.XXXXXXXXXX) || return 1
+
+    local squash_params=""
+    if succeed_if_not_null "${commit_msg_buffer}"; then
+        console_msg "Applying commit message..."
+        line_divider
+        console_msg "${commit_msg_buffer}"
+        line_divider
+
+        echo "${commit_msg_buffer}" > ${commit_msg_file}
+        squash_params="--file ${commit_msg_file}"
+    fi
+
+    colorize git commit ${squash_params}
+    local commit_code=${?}
+
+    rm ${commit_msg_file}
+    return ${commit_code}
+}
+
+#################################################
+# Dr Git specific config fetching               #
+#################################################
+function __require_dr_git_config() {
+    if [[ $# -ne 1 ]]; then
+        usage_and_die "${FUNCNAME} <config_key>"
+    fi
+
+    local config_key=${1}
+    local config_value=$(git config --local ${config_key})
+    if succeed_if_null "${config_value}"; then
+        error_msg "${FUNCNAME} - ${config_key} not set, did you run 'git dr-init'?"
+        exit 1
+    fi
+
+    echo ${config_value}
+}
+
+function dr_prefix_dev() {
+    __require_dr_git_config "${DR_GIT_CONFIG_PREFIX_DEV}"
+}
+
+function dr_prefix_project() {
+    __require_dr_git_config "${DR_GIT_CONFIG_PREFIX_PROJECT}"
+}
+
+function dr_prefix_release() {
+    __require_dr_git_config "${DR_GIT_CONFIG_PREFIX_RELEASE}"
+}
+
+function dr_master_repo() {
+    __require_dr_git_config "${DR_GIT_CONFIG_MASTER_REPO}"
+}
+
+function dr_master_branch() {
+    __require_dr_git_config "${DR_GIT_CONFIG_MASTER_BRANCH}"
+}
+
+function dr_branch_source() {
+    if [[ $# -ne 1 ]]; then
+        usage_and_die "${FUNCNAME} <tgt_branch_name>"
+    fi
+
+    # See branch_create_locally to see where this is set, this should NOT include the repo prefix
+    local tgt_branch_name=${1}
+
+    local raw_src_branch=$(git config --local branch.${tgt_branch_name}.merge 2>/dev/null)
+    local substr="refs/heads/"
+    echo ${raw_src_branch/${substr}/}
+
+    # echo $(git config --local branch.${tgt_branch_name}.drgit-source 2>/dev/null)
+}
+
+function dr_master_repo_branch() {
+    echo $(dr_master_repo)/$(dr_master_branch)
+}
+
+#################################################
+# Convenience methods to set certain git values #
+#################################################
+# STABLE
+function ask_git_config() {
+    if [[ $# -ne 3 ]]; then
+        usage_and_die "${FUNCNAME} <config_key> <config_question> <config_given_value>"
+    fi
+    local config_key=${1}
+    local config_question=${2}
+    local config_given_value=${3}
+    local config_default_value=$(git config --get ${config_key} 2>/dev/null)
+
+    local question_result=""
+
+    # Conditional variable setting - http://www.linuxjournal.com/article/8919
+    # Python style - config_default_value = config_default_value or config_value
+    config_default_value=$(string_or "${config_default_value}" "${config_given_value}")
+
+    question_result=$(question_with_default "${config_question}" "${config_default_value}")
+    git config --local "${config_key}" "${question_result}"
+}
+
+#####################
+# Execution methods #
+#####################
+
+# STABLE
+function __require_git_dir() {
+    local top_level_dir=$(git_top_level)
+    if succeed_if_null "${top_level_dir}"; then
+        error_msg "${FUNCNAME} - No git repository found"
+        exit 1
+    fi
+    return 0
+}
+
+# Borrowed from git-flow - See gitflow-common:git_is_clean_working_tree
+function __require_clean_git_tree() {
+    if ! git diff --no-ext-diff --ignore-submodules --quiet --exit-code; then
+        error_msg "${FUNCNAME} - Found unstaged changes, aborting"
+        exit 1
+    elif ! git diff-index --cached --quiet --ignore-submodules HEAD --; then
+        error_msg "${FUNCNAME} - Found uncommitted changes, aborting"
+        exit 2
+    else
+        return 0
+    fi
+}
+
+function __require_fetch() {
+    if [[ $# -gt 1 ]]; then
+        usage_and_die "${FUNCNAME} [<fetch_options>]"
+    fi
+
+    if ! colorize git fetch $(dr_master_repo) ${@}; then
+        error_msg "${FUNCNAME} - Could not fetch!  Aborting"
+        exit 1
+    fi
+    return ${?}
+}
+
+# STABLE
+function execute_hook_when_available() {
+    if [[ $# -lt 1 ]]; then
+        usage_and_die "${FUNCNAME} <hook_name>"
+    fi
+
+    local git_dir=$(git rev-parse --git-dir)
+    if [[ ${?} -ne 0 ]]; then
+        error_msg "${FUNCNAME} - No git repository found"
+        exit 1
+    fi
+    local hook_name=${1}
+    shift
+
+    # Scan your repository's hooks
+    local hook_dirs=("${git_dir}/hooks" "${DR_GIT_HOME}/hooks")
+    for current_hook_dir in ${hook_dirs[@]}; do
+        local hook_dir=$(readlink_dir "${current_hook_dir}")
+        local hook_path="${hook_dir}/${hook_name}"
+
+        # Execute the first hook we found
+        if [[ -f ${hook_path} ]]; then
+            ${hook_path} "${@}"
+            if [[ ${?} -eq 0 ]]; then
+                console_msg "Executed hook - ${hook_path}"
+                return 0
+            else
+                error_msg "Failed hook - ${hook_path}"
+                exit 1
+            fi
+        fi
+    done
+}
+
+# UNTESTED / UNUSED
+function git_commit_exists() {
+    if [[ $# -ne 1 ]]; then
+        usage_and_die "${FUNCNAME} <commit>"
+    fi
+    local commit=${1}
+    git rev-list -n 1 ${commit} >/dev/null 2>&1
+    return ${?}
+}
+
+function branch_diff_equal() {
+    if [[ $# -ne 2 ]]; then
+        usage_and_die "${FUNCNAME} <branch_one> <branch_two>"
+    fi
+    local branch_one=${1}
+    local branch_two=${2}
+
+    succeed_if_null "$(git diff --shortstat ${branch_one} ${branch_two})"
+    return ${?}
+}
+
+# Returns 0/1 depending on whether or not the given function exists
+# STABLE
+function branch_exists_locally() {
+    if [[ $# -ne 1 ]]; then
+        usage_and_die "${FUNCNAME} <branch_name>"
+    fi
+    local branch_name=${1}
+    local branch_exists=$(git branch --no-color | grep -E "^.{1,2}${branch_name}$")
+
+    succeed_if_not_null "${branch_exists}"
+    return ${?}
+}
+
+# STABLE
+function branch_exists_remotely() {
+    if [[ $# -ne 2 ]]; then
+        usage_and_die "${FUNCNAME} <branch_name> <repo_name>"
+    fi
+    local branch_name=${1}
+    local repo_name=${2}
+
+    local branch_exists=$(git branch --no-color -r | grep -E "^.{1,2}${repo_name}/${branch_name}$")
+
+    succeed_if_not_null "${branch_exists}"
+    return ${?}
+}
+
+# UNTESTED
+function branch_contains_commit() {
+    if [[ $# -ne 2 ]]; then
+        usage_and_die "${FUNCNAME} <branch_name> <commit>"
+    fi
+    local branch_name=${1}
+    local commit=${2}
+
+    # This requires additional error checking!
+    local branches_with_latest_stable=$(git branch --no-color --contains "${commit}")
+    string_contains "${branches_with_latest_stable}" "${branch_name}"
+    return ${?}
+}
+
+###########################################################
+# Convenience methods to do branch manipulations          #
+###########################################################
+# ASSUMPTION: Callers have already called __require_git_dir #
+###########################################################
+# Push branch to remote
+function branch_push_to_remote() {
+    if [[ $# -ne 2 ]]; then
+        usage_and_die "${FUNCNAME} <branch_name> <tgt_repo_name>"
+    fi
+    local branch_name=${1}
+    local tgt_repo_name=${2}
+
+    colorize git push ${tgt_repo_name} ${branch_name}
+    return ${?}
+}
+
+# Force push branch to remote
+function branch_force_push_to_remote() {
+    if [[ $# -ne 2 ]]; then
+        usage_and_die "${FUNCNAME} <branch_name> <tgt_repo_name>"
+    fi
+    local branch_name=${1}
+    local tgt_repo_name=${2}
+
+    colorize git push -f ${tgt_repo_name} ${branch_name}
+    return ${?}
+}
+
+
+# Create a remote branch, cut ${tgt_branch_name} from ${src_branch_name}
+function branch_create_remotely() {
+    if [[ $# -ne 3 ]]; then
+        usage_and_die "${FUNCNAME} <tgt_branch_name> <src_branch_name> <repo_name>"
+    fi
+    local tgt_branch_name=${1}
+    local src_branch_name=${2}
+    local repo_name=${3}
+
+    if ! branch_exists_remotely ${src_branch_name} ${repo_name}; then
+        error_msg "${FUNCNAME} - Branch ${src_branch_name} does not exist on ${repo_name}"
+        return 1
+    elif branch_exists_remotely ${tgt_branch_name} ${repo_name}; then
+        error_msg "${FUNCNAME} - Branch ${tgt_branch_name} already exists on ${repo_name}"
+        return 1
+    fi
+
+    colorize git push ${repo_name} remotes/${repo_name}/${src_branch_name}:refs/heads/${tgt_branch_name}
+    return ${?}
+}
+
+
+# Create a local branch, cut ${tgt_branch_name} from ${src_branch_name}
+function branch_create_locally() {
+    if [[ $# -ne 3 ]]; then
+        usage_and_die "${FUNCNAME} <tgt_branch_name> <src_branch_name> <repo_name>"
+    fi
+    local tgt_branch_name=${1}
+    local src_branch_name=${2}
+    local repo_name=${3}
+
+    if ! branch_exists_remotely ${src_branch_name} ${repo_name}; then
+        error_msg "${FUNCNAME} - Branch ${src_branch_name} does not exist on ${repo_name}"
+        return 1
+    elif branch_exists_remotely ${tgt_branch_name} ${repo_name}; then
+        error_msg "${FUNCNAME} - Branch ${tgt_branch_name} already exists on ${repo_name}"
+        return 1
+    fi
+
+    colorize git checkout --track -b ${tgt_branch_name} ${repo_name}/${src_branch_name}
+    # git config --local "branch.${tgt_branch_name}.drgit-source" ${src_branch_name}
+
+    return ${?}
+}
+
+# Delete remote branch
+function branch_delete_from_remote() {
+    if [[ $# -ne 2 ]]; then
+        usage_and_die "${FUNCNAME} <branch_name> <tgt_repo_name>"
+    fi
+    local branch_name=${1}
+    local repo_name=${2}
+
+    colorize git push ${repo_name} :${branch_name}
+    return ${?}
+}
+
+# Clone a remote branch into its own directory, do NOT copy repository configs
+function branch_clone_from_remote() {
+    if [[ $# -lt 2 ]]; then
+        usage_and_die "${FUNCNAME} <branch_name> <src_repo_name> [<tgt_directory>]"
+    fi
+    local branch_name=${1}
+    local src_repo_name=${2}
+
+    local possible_tgt_directory=$(echo ${branch_name} | grep --only-matching -E '\w*?$')
+    local tgt_directory=$(string_or "${3}" "${possible_tgt_directory}")
+
+    local src_repo_url=$(git_repo_url ${src_repo_name})
+    local top_level_dir=$(git_top_level)
+    local above_top_level_dir=${top_level_dir}/..
+
+    # Cut a new branch from "master"
+    # Make a local copy of this repo using THIS repo as reference
+    cd ${above_top_level_dir}
+    colorize git clone --reference ${top_level_dir} --branch ${branch_name} -- ${src_repo_url} ${tgt_directory}
+
+    cd ${above_top_level_dir}/${tgt_directory}
+
+    # Remove dependency on our reference repo
+    colorize git repack -a
+    return 0
+}
+
+function branch_merge_with_source() {
+    if [[ $# -ne 1 ]]; then
+        usage_and_die "${FUNCNAME} <branch_source>"
+    fi
+    __require_clean_git_tree
+    __require_fetch
+
+    local branch_source=${1}
+    local branch_name=$(git_current_branch)
+
+    local pre_rebase_commit=$(git merge-base ${branch_name} ${branch_source})
+    console_msg "Merging in the following changes:"
+    colorize git diff --stat ${pre_rebase_commit} ${branch_source}
+    console_msg ""
+
+    # TODO - Clean up
+    if ! colorize git merge ${branch_source}; then
+        error_msg "${FUNCNAME} - Found conflicts while merging"
+        error_msg "To abort:"
+        error_msg "  * Run 'git merge --abort'"
+        error_msg ""
+        error_msg "To finish:"
+        error_msg "  * Resolve conflicts, 'git add' affected files, and FINALLY run 'git commit'"
+        return 1
+    fi
+}
+
+function branch_rebase_with_source() {
+    if [[ $# -ne 1 ]]; then
+        usage_and_die "${FUNCNAME} <branch_source>"
+    fi
+    __require_clean_git_tree
+    __require_fetch
+
+    local branch_source=${1}
+    local branch_name=$(git_current_branch)
+
+    local pre_rebase_commit=$(git merge-base ${branch_name} ${branch_source})
+    console_msg "Rebasing in the following changes:"
+    colorize git diff --stat ${pre_rebase_commit} ${branch_source}
+    console_msg ""
+
+    if ! colorize git rebase ${branch_source}; then
+        error_msg "${FUNCNAME} - Found conflicts while rebasing"
+        error_msg "To abort:"
+        error_msg "  * Run 'git rebase --abort'"
+        error_msg ""
+        error_msg "To finish:"
+        error_msg "  * Resolve conflicts, 'git add' affected files, run 'git rebase --continue' [Repeat as necessary]"
+        return 1
+    fi
+}
+
+# Squash a branch in place, preserving all previous commit messages
+function branch_safe_squash_inplace() {
+    if [[ $# -ne 2 ]]; then
+        usage_and_die "${FUNCNAME} <squash_to_commit> <commit_msg_buffer>"
+    fi
+    local branch_name=$(git_current_branch)
+    local squash_to_commit=${1}
+    local commit_msg_buffer=${2}
+
+    if ! branch_contains_commit ${branch_name} ${squash_to_commit}; then
+        error_msg "${FUNCNAME} - ${branch_name} does not contain commit ${squash_to_commit}"
+        return 1
+    fi
+
+    local short_log=$(git log --format=short ${squash_to_commit}..${branch_name})
+    local num_merges=$(echo "${short_log}" | grep -c '^Merge:')
+
+    local authors=$(echo "${short_log}" | grep '^Author:' | cut -c 9- | sort | uniq)
+    local num_authors=$(echo "${authors}" | wc -l)
+    if [[ ${num_merges} -gt 0 ]]; then
+        error_msg "${FUNCNAME} - Cannot squash a branch with merge commits."
+    elif [[ ${num_authors} -gt 1 ]]; then
+        error_msg "Branch contains commits by the following authors:"
+        error_msg "${authors}"
+        error_msg "${FUNCNAME} - Squashing would lose authorship"
+        return 1
+    fi
+
+    colorize git reset --soft ${squash_to_commit}
+    git_commit_with_msg "${commit_msg_buffer}"
+    return ${?}
+}
+
+###########################################################
+# Convenience methods to do branch manipulations          #
+###########################################################
+# STABLE
+function interactive_branch_push_to_remote() {
+    if [[ $# -ne 2 ]]; then
+        usage_and_die "${FUNCNAME} <branch_name> <tgt_repo_name>"
+    fi
+    local branch_name=${1}
+    local tgt_repo_name=${2}
+
+    if ! branch_push_to_remote ${branch_name} ${tgt_repo_name}; then
+        error_msg ""
+        error_msg "${FUNCNAME} - Local branch failed to push cleanly to ${tgt_repo_name}"
+        error_msg "              Did you perhaps sync with master?  If so, and you know nobody else"
+        error_msg "              has touched the branch in origin, you can safely answer yes below."
+        error_msg ""
+
+        if question_yes_no "Forcibly update remote branch with your version of history"; then
+            if ! branch_force_push_to_remote ${branch_name} ${tgt_repo_name}; then
+                error_msg "${FUNCNAME} - Could not publish your branch"
+                return 1
+            fi
+
+        else
+            console_msg "${FUNCNAME} - User aborted branch publishing : ${branch_name} to ${tgt_repo_name}"
+            return 2
+        fi
+    fi
+
+    console_msg "Published branch : ${branch_name} to ${master_repo}"
+}
+

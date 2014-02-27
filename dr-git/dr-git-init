@@ -1,0 +1,16 @@
+#!/bin/bash
+# Requires "drgit-script-util" to be sourced
+# Requires "drgit-git-util" to be sourced
+
+function init_repo() {
+    ask_git_config "drgit.prefix.dev" "Development branches" "dev/"
+    ask_git_config "drgit.prefix.project" "Project branches" "project/"
+    ask_git_config "drgit.prefix.release" "Release branches" "release/"
+
+    ask_git_config "drgit.master.repo" "Master repository name" "origin"
+    ask_git_config "drgit.master.branch" "Master branch name" "master"
+
+    console_msg "Repository initialized to work with dr-git!"
+
+    execute_hook_when_available post-dr-init
+}

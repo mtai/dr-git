@@ -1,0 +1,39 @@
+#!/bin/bash
+source ${DR_GIT_HOME}/dr-git/drgit-script-util
+cd $(git_top_level)/..
+
+above_base_dir=$(pwd)
+above_base_dir_files=$(ls)
+chosen_target=${1}
+
+if [[ ! -L "$above_base_dir/current" ]]; then
+    error_msg "Expected DEV to be a symlink"
+    exit 1
+fi
+
+if [[ "$#" -gt 1 ]]; then
+    usage_and_die "[<branch name>]"
+elif [[ "$#" -eq 1 ]]; then
+    chosen_target=${1}
+else
+    declare -a available_targets=();
+    for current_file in ${above_base_dir_files[@]}; do
+        if [[ -L "${current_file}" ]]; then
+            continue
+        elif [[ -d "${current_file}" && -d "${current_file}/.git" ]]; then
+            available_targets=("${available_targets[@]}" "$current_file")
+        fi
+    done
+
+    chosen_target=$(choose_target "${available_targets[@]}")
+fi
+
+if [[ ! -d "$above_base_dir/${chosen_target}" ]]; then
+    error-out "Invalid target - $above_base_dir/${chosen_target}"
+fi
+
+cd "$above_base_dir"
+rm current
+ln -s ${chosen_target} current
+echo
+echo "Updated symlink: current -> ${chosen_target}"

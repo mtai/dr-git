@@ -1,0 +1,13 @@
+#!/bin/bash
+# Add code here to run after - git adku init
+
+source ${DR_GIT_HOME}/dr-git/drgit-script-util
+source ${DR_GIT_HOME}/dr-git/drgit-git-util
+
+# Automatically setup common git configs
+# colorize git config --local reviewboard.url http://reviewboard.internal/r/
+colorize git config --local color.diff auto
+colorize git config --local color.branch auto
+colorize git config --local color.status auto
+colorize git config --local rerere.autoupdate true
+colorize git config --local rerere.enabled true

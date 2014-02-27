@@ -1,0 +1,16 @@
+#!/bin/bash
+source ${DR_GIT_HOME}/dr-git/drgit-script-util
+source ${DR_GIT_HOME}/dr-git/drgit-git-util
+
+source ${DR_GIT_HOME}/dr-git/dr-git-dev
+
+new_branch=${1}
+new_dev_branch=$(__name_dev_branch ${new_branch})
+old_branch=$(git_current_branch)
+
+git-dr-dev-start ${new_branch}
+
+colorize git checkout ${old_branch}
+colorize git branch -d ${new_dev_branch}
+
+git-dr-clone ${new_dev_branch} ${new_branch}

@@ -1,0 +1,75 @@
+#!/bin/bash
+# Requires "drgit-script-util" to be sourced
+# Requires "drgit-git-util" to be sourced
+
+function __discover_released_branches() {
+    local dev_prefix=$(dr_prefix_dev)
+    local drc_branch=""
+
+    local master_repo_branch=$(dr_master_repo_branch)
+    local all_local_branches=$(git_local_branches)
+
+    local cherry_output=""
+    local branch_already_released=""
+
+    declare -a branches_to_delete=()
+    for local_branch in ${all_local_branches[@]}; do
+        # At this point, we are pretty sure that we're in this branch
+        if ! string_startswith "${local_branch}" "${dev_prefix}"; then
+            console_msg "Skipping non-dev branch - ${local_branch}"
+            continue
+        fi
+
+        # At this point we know a local branch is a dev branch, rename for clarity
+        dev_branch="${local_branch}"
+        drc_branch=$(__name_drc_from_dev_branch "${dev_branch}")
+
+        if ! string_contains "${all_local_branches}" "${drc_branch}"; then
+            console_msg "Skipping unsubmitted branch - ${dev_branch}"
+            continue
+        fi
+
+        # If there's no output, continue on
+        cherry_output=$(git cherry ${master_repo_branch} ${drc_branch})
+        if succeed_if_null "${cherry_output}"; then
+            console_msg "Skipping branch awaiting release - ${dev_branch}"
+            continue
+        fi
+
+        branch_already_released="true"
+        for cherry_line in "${cherry_output[@]}"; do
+            if ! string_startswith "${cherry_line}" "-"; then
+                branch_already_released="false"
+            fi
+        done
+
+        if [[ "${branch_already_released}" == "false" ]]; then
+            console_msg "Skipping branch awaiting release - ${dev_branch}"
+            continue
+        fi
+        console_msg "Found branches to delete: ${dev_branch} ${drc_branch}"
+        branches_to_delete=( ${branches_to_delete[@]} ${dev_branch} ${drc_branch} )
+    done
+
+    echo "${branches_to_delete[@]}"
+}
+
+function vacuum_repo() {
+    __require_git_dir
+    __require_fetch --prune
+
+    local master_repo=$(dr_master_repo)
+    local already_released_branches=$(__discover_released_branches)
+
+    colorize git checkout $(dr_master_branch)
+
+    for current_branch in ${already_released_branches[@]}; do
+        colorize git branch -D ${current_branch}
+        if ! branch_delete_from_remote ${current_branch} ${master_repo}; then
+            continue
+        fi
+    done
+
+    console_msg "Local repository vacuumed!"
+
+}

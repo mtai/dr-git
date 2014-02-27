@@ -1,0 +1,126 @@
+#!/bin/bash
+# Requires "drgit-script-util" to be sourced
+# Requires "drgit-git-util" to be sourced
+# Requires "git-dr-sync" to be sourced
+
+function __require_project_branch() {
+    if ! string_startswith $(git_current_branch) $(dr_prefix_project); then
+        error_msg "${FUNCNAME} - Can only be run from a project branch"
+        exit 1
+    fi
+}
+
+function __name_project_branch() {
+    if [[ $# -ne 1 ]]; then
+          usage_and_die "${FUNCNAME} <branch_name>"
+    fi
+    local branch_name=${1}
+    echo $(dr_prefix_project)${branch_name}
+}
+
+###################
+# project methods #
+###################
+
+# STABLE
+function _enumerate_projects() {
+    local project_branches=$(sort_array "$(git branch -r --no-color | grep $(dr_prefix_project))")
+    for current_branch in ${project_branches[@]}; do
+        echo $(_strip_remote_from_project "${current_branch}")
+    done
+}
+
+function _strip_remote_from_project() {
+    if [[ $# -ne 1 ]]; then
+          usage_and_die "${FUNCNAME} <branch_name>"
+    fi
+    local project_repo_branch=${1}
+    echo $(echo ${project_repo_branch} | sed "s/$(dr_master_repo)\///g")
+}
+
+# STABLE
+function project_list() {
+    __require_git_dir
+    __require_fetch
+
+    local project_branches=$(_enumerate_projects)
+    if succeed_if_null "${project_branches[@]}"; then
+        error_msg "No project branches found"
+        return 1
+    fi
+
+    for current_branch in ${project_branches[@]}; do
+        console_msg "${current_branch}"
+    done
+}
+
+# STABLE
+function project_start() {
+    if [[ $# -ne 1 ]]; then
+        usage_and_die "${FUNCNAME} <branch_name>"
+    fi
+    __require_git_dir
+    __require_fetch
+
+    local branch_name=${1}
+    local src_branch_name=$(dr_master_branch)
+    local tgt_branch_name=$(__name_project_branch ${branch_name})
+
+    if ! branch_create_remotely ${tgt_branch_name} ${src_branch_name} $(dr_master_repo); then
+        return 1
+    fi
+
+    execute_hook_when_available post-dr-project-start ${tgt_branch_name} ${src_branch_name}
+    console_msg "Created project branch : ${tgt_branch_name} from ${src_branch_name}"
+}
+
+# STABLE
+function project_sync() {
+    __require_git_dir
+    __require_project_branch
+
+    local branch_name=$(git_current_branch)
+    local src_branch=$(dr_master_branch)
+    local branch_repo=$(dr_master_repo)
+
+    if ! branch_merge_with_source ${branch_repo}/${src_branch}; then
+        error_msg "  * Re-run 'git dr-project-sync'"
+        return 1
+    fi
+
+    if ! branch_push_to_remote ${branch_name} ${branch_repo}; then
+        error_msg "Could not update ${branch_name} on ${branch_repo}"
+        return 2
+    fi
+
+    console_msg "Synced branch : ${branch_name} with ${src_branch}"
+    execute_hook_when_available post-dr-project-sync
+}
+
+
+# UNTESTED
+function project_delete() {
+    if [[ $# -ne 1 ]]; then
+        usage_and_die "${FUNCNAME} <branch_name>"
+    fi
+    __require_git_dir
+    __require_fetch
+
+    local master_repo=$(dr_master_repo)
+    local project_branch_name=${1}
+
+    if branch_exists_locally ${project_branch_name}; then
+        if question_yes_no "Delete local project branch - ${project_branch_name}"; then
+            colorize git branch -D ${project_branch_name}
+        fi
+    fi
+
+    if branch_exists_remotely ${project_branch_name} ${master_repo}; then
+        if question_yes_no "Delete remote project branch - ${project_branch_name}"; then
+            branch_delete_from_remote ${project_branch_name} ${master_repo}
+        fi
+    fi
+
+    execute_hook_when_available post-dr-project-delete ${project_branch_name}
+    console_msg "Deleted project branch : ${project_branch_name}"
+}
