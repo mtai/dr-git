@@ -3,7 +3,7 @@ Installation
 ========================================
 1) cd <INSTALL_DIR>
 
-2) git clone git@github:mtai/dr-git.git
+2) git clone https://github.com/mtai/dr-git.git
 
 3) vi ~/.bashrc
     DR_GIT_HOME=<INSTALL_DIR>/dr-git/
